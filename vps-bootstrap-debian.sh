@@ -14,7 +14,7 @@ warn() { printf '\n[WARN] %s\n' "$*" >&2; }
 die() { printf '\n[ERROR] %s\n' "$*" >&2; exit 1; }
 
 require_root() {
-  [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root: sudo bash ${SCRIPT_NAME}"
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root: bash ${SCRIPT_NAME}"
 }
 
 require_tty() {
@@ -76,6 +76,49 @@ prompt_ssh_key() {
   done
 }
 
+validate_ip_or_cidr() {
+  local value="$1"
+  python3 - "$value" <<'PY'
+import ipaddress
+import sys
+
+try:
+    ipaddress.ip_network(sys.argv[1], strict=False)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+prompt_trusted_ips() {
+  local raw="" token="" cleaned=""
+  local -a valid=()
+  declare -A seen=()
+
+  while true; do
+    printf '\nEnter trusted IPs or CIDR ranges for whitelist (space or comma separated).\nExample: 1.2.3.4 5.6.7.8/32 2001:db8::1\nTrusted IPs will be allowed in UFW and excluded from Fail2ban bans.\nTrusted IPs: ' > "$TTY_DEVICE"
+    IFS= read -r raw < "$TTY_DEVICE"
+    cleaned="${raw//,/ }"
+
+    valid=()
+    seen=()
+    for token in $cleaned; do
+      validate_ip_or_cidr "$token" || {
+        echo "Invalid IP or CIDR: $token" > "$TTY_DEVICE"
+        valid=()
+        break
+      }
+      if [[ -z "${seen[$token]+x}" ]]; then
+        valid+=("$token")
+        seen[$token]=1
+      fi
+    done
+
+    [[ ${#valid[@]} -gt 0 ]] || { echo "Enter at least one valid IP or CIDR." > "$TTY_DEVICE"; continue; }
+    printf '%s\n' "${valid[*]}"
+    return 0
+  done
+}
+
 ensure_include_for_sshd_dropins() {
   if ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' "$SSHD_MAIN"; then
     cp -a "$SSHD_MAIN" "${SSHD_MAIN}.bak.$(date +%s)"
@@ -122,7 +165,8 @@ install_packages() {
     ca-certificates \
     curl \
     lsof \
-    kmod
+    kmod \
+    python3-minimal
 }
 
 configure_user() {
@@ -168,6 +212,10 @@ EOF_SSH
 
 configure_fail2ban() {
   local ssh_port="$1"
+  local trusted_ips="$2"
+  local ignore_line="127.0.0.1/8 ::1"
+
+  [[ -n "$trusted_ips" ]] && ignore_line+=" ${trusted_ips}"
 
   log "Configuring Fail2ban"
   mkdir -p /etc/fail2ban/jail.d
@@ -176,6 +224,7 @@ configure_fail2ban() {
 enabled = true
 port = ${ssh_port}
 backend = systemd
+ignoreip = ${ignore_line}
 maxretry = 5
 findtime = 10m
 bantime = 1h
@@ -215,12 +264,18 @@ collect_active_ports() {
 configure_ufw() {
   local ssh_port="$1"
   local active_ports="$2"
-  local item proto port
+  local trusted_ips="$3"
+  local item proto port ip
 
   log "Configuring UFW"
   ufw --force reset
   ufw default deny incoming
   ufw default allow outgoing
+
+  for ip in $trusted_ips; do
+    ufw allow from "$ip"
+  done
+
   ufw limit "${ssh_port}/tcp"
 
   while IFS= read -r item; do
@@ -269,7 +324,7 @@ main() {
   echo "This script will update the server, create a sudo user, harden SSH, enable UFW, configure Fail2ban, install btop and try to enable BBR."
   echo
 
-  local username password ssh_key ssh_port ssh_service active_ports bbr_status
+  local username password ssh_key trusted_ips ssh_port ssh_service active_ports bbr_status
 
   username="$(prompt_nonempty 'Enter new username: ')"
   validate_username "$username"
@@ -279,15 +334,16 @@ main() {
 
   install_packages
 
+  trusted_ips="$(prompt_trusted_ips)"
   ssh_service="$(get_ssh_service_name)"
   ssh_port="$(pick_random_port)"
 
   configure_user "$username" "$password" "$ssh_key"
   configure_ssh "$ssh_port" "$ssh_service"
-  configure_fail2ban "$ssh_port"
+  configure_fail2ban "$ssh_port" "$trusted_ips"
 
   active_ports="$(collect_active_ports)"
-  configure_ufw "$ssh_port" "$active_ports"
+  configure_ufw "$ssh_port" "$active_ports" "$trusted_ips"
   bbr_status="$(configure_bbr)"
 
   log "Done"
@@ -295,12 +351,17 @@ main() {
   echo "New sudo user: $username"
   echo "New SSH port: $ssh_port"
   echo
+  echo "Trusted IP whitelist:"
+  echo "$trusted_ips" | tr ' ' '\n' | sed 's/^/  - /'
+  echo
   echo "Allowed public ports in UFW:"
   if [[ -n "$active_ports" ]]; then
     echo "$active_ports" | sed 's/^/  - /'
   else
     echo "  - none detected (except SSH ${ssh_port}/tcp, which was allowed with rate limit)"
   fi
+  echo
+  echo "Fail2ban ignoreip includes localhost plus your trusted IPs."
   echo
   case "$bbr_status" in
     enabled)
