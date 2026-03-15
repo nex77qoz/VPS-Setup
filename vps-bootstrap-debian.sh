@@ -40,6 +40,19 @@ prompt_nonempty() {
   done
 }
 
+prompt_auth_method() {
+  local choice=""
+  while true; do
+    printf '\nChoose login method for the new user:\n1) Password\n2) SSH key only\nSelection [1/2]: ' > "$TTY_DEVICE"
+    IFS= read -r choice < "$TTY_DEVICE"
+    case "$choice" in
+      1) printf 'password'; return 0 ;;
+      2) printf 'ssh'; return 0 ;;
+      *) echo "Enter 1 or 2." > "$TTY_DEVICE" ;;
+    esac
+  done
+}
+
 prompt_password() {
   local p1="" p2=""
   while true; do
@@ -171,23 +184,36 @@ install_packages() {
 
 configure_user() {
   local username="$1"
-  local password="$2"
-  local ssh_key="$3"
+  local auth_method="$2"
+  local password="${3:-}"
+  local ssh_key="${4:-}"
 
   log "Creating user '$username'"
   adduser --disabled-password --gecos "" "$username"
-  echo "${username}:${password}" | chpasswd
+
+  if [[ "$auth_method" == "password" ]]; then
+    [[ -n "$password" ]] || die "Password login selected, but password is empty."
+    echo "${username}:${password}" | chpasswd
+  fi
+
   usermod -aG sudo "$username"
 
-  install -d -m 700 -o "$username" -g "$username" "/home/$username/.ssh"
-  printf '%s\n' "$ssh_key" > "/home/$username/.ssh/authorized_keys"
-  chown "$username:$username" "/home/$username/.ssh/authorized_keys"
-  chmod 600 "/home/$username/.ssh/authorized_keys"
+  if [[ "$auth_method" == "ssh" ]]; then
+    [[ -n "$ssh_key" ]] || die "SSH login selected, but SSH key is empty."
+    install -d -m 700 -o "$username" -g "$username" "/home/$username/.ssh"
+    printf '%s\n' "$ssh_key" > "/home/$username/.ssh/authorized_keys"
+    chown "$username:$username" "/home/$username/.ssh/authorized_keys"
+    chmod 600 "/home/$username/.ssh/authorized_keys"
+  fi
 }
 
 configure_ssh() {
   local ssh_port="$1"
   local ssh_service="$2"
+  local auth_method="$3"
+  local password_auth="yes"
+
+  [[ "$auth_method" == "ssh" ]] && password_auth="no"
 
   command -v sshd >/dev/null 2>&1 || die "sshd binary not found after installing openssh-server."
 
@@ -199,7 +225,7 @@ configure_ssh() {
 Port ${ssh_port}
 PermitRootLogin prohibit-password
 PubkeyAuthentication yes
-PasswordAuthentication yes
+PasswordAuthentication ${password_auth}
 KbdInteractiveAuthentication no
 UsePAM yes
 EOF_SSH
@@ -324,13 +350,17 @@ main() {
   echo "This script will update the server, create a sudo user, harden SSH, enable UFW, configure Fail2ban, install btop and try to enable BBR."
   echo
 
-  local username password ssh_key trusted_ips ssh_port ssh_service active_ports bbr_status
+  local username auth_method password="" ssh_key="" trusted_ips ssh_port ssh_service active_ports bbr_status
 
   username="$(prompt_nonempty 'Enter new username: ')"
   validate_username "$username"
+  auth_method="$(prompt_auth_method)"
 
-  password="$(prompt_password)"
-  ssh_key="$(prompt_ssh_key)"
+  if [[ "$auth_method" == "password" ]]; then
+    password="$(prompt_password)"
+  else
+    ssh_key="$(prompt_ssh_key)"
+  fi
 
   install_packages
 
@@ -338,8 +368,8 @@ main() {
   ssh_service="$(get_ssh_service_name)"
   ssh_port="$(pick_random_port)"
 
-  configure_user "$username" "$password" "$ssh_key"
-  configure_ssh "$ssh_port" "$ssh_service"
+  configure_user "$username" "$auth_method" "$password" "$ssh_key"
+  configure_ssh "$ssh_port" "$ssh_service" "$auth_method"
   configure_fail2ban "$ssh_port" "$trusted_ips"
 
   active_ports="$(collect_active_ports)"
@@ -349,6 +379,7 @@ main() {
   log "Done"
   echo
   echo "New sudo user: $username"
+  echo "Login method: $auth_method"
   echo "New SSH port: $ssh_port"
   echo
   echo "Trusted IP whitelist:"
