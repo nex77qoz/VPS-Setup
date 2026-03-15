@@ -7,13 +7,18 @@ SSHD_MAIN="/etc/ssh/sshd_config"
 F2B_JAIL="/etc/fail2ban/jail.d/sshd.local"
 BBR_CONF="/etc/sysctl.d/99-bbr.conf"
 BBR_MODULES_CONF="/etc/modules-load.d/bbr.conf"
+TTY_DEVICE="/dev/tty"
 
-log() { printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
+log() { printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
 warn() { printf '\n[WARN] %s\n' "$*" >&2; }
 die() { printf '\n[ERROR] %s\n' "$*" >&2; exit 1; }
 
 require_root() {
   [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root: sudo bash ${SCRIPT_NAME}"
+}
+
+require_tty() {
+  [[ -r "$TTY_DEVICE" && -w "$TTY_DEVICE" ]] || die "Interactive terminal not available. Run this script from a real SSH shell."
 }
 
 require_debian() {
@@ -28,19 +33,26 @@ prompt_nonempty() {
   local prompt="$1"
   local value=""
   while true; do
-    read -r -p "$prompt" value
+    printf '%s' "$prompt" > "$TTY_DEVICE"
+    IFS= read -r value < "$TTY_DEVICE"
     [[ -n "$value" ]] && { printf '%s' "$value"; return 0; }
-    echo "Value cannot be empty."
+    echo "Value cannot be empty." > "$TTY_DEVICE"
   done
 }
 
 prompt_password() {
   local p1="" p2=""
   while true; do
-    read -r -s -p "Enter password for the new user: " p1; echo
-    read -r -s -p "Repeat password: " p2; echo
-    [[ -n "$p1" ]] || { echo "Password cannot be empty."; continue; }
-    [[ "$p1" == "$p2" ]] || { echo "Passwords do not match."; continue; }
+    printf 'Enter password for the new user: ' > "$TTY_DEVICE"
+    IFS= read -r -s p1 < "$TTY_DEVICE"
+    printf '\n' > "$TTY_DEVICE"
+
+    printf 'Repeat password: ' > "$TTY_DEVICE"
+    IFS= read -r -s p2 < "$TTY_DEVICE"
+    printf '\n' > "$TTY_DEVICE"
+
+    [[ -n "$p1" ]] || { echo "Password cannot be empty." > "$TTY_DEVICE"; continue; }
+    [[ "$p1" == "$p2" ]] || { echo "Passwords do not match." > "$TTY_DEVICE"; continue; }
     printf '%s' "$p1"
     return 0
   done
@@ -54,12 +66,11 @@ validate_username() {
 
 prompt_ssh_key() {
   local key=""
-  echo
-  echo "Paste your PUBLIC SSH key (expected: ssh-rsa ...)."
+  printf '\nPaste your PUBLIC SSH key (expected: ssh-rsa ...).\n' > "$TTY_DEVICE"
   while true; do
-    read -r key
-    [[ -n "$key" ]] || { echo "Key cannot be empty."; continue; }
-    [[ "$key" == ssh-rsa\ * ]] || { echo "This does not look like an RSA public key. It should start with 'ssh-rsa '."; continue; }
+    IFS= read -r key < "$TTY_DEVICE"
+    [[ -n "$key" ]] || { echo "Key cannot be empty." > "$TTY_DEVICE"; continue; }
+    [[ "$key" == ssh-rsa\ * ]] || { echo "This does not look like an RSA public key. It should start with 'ssh-rsa '." > "$TTY_DEVICE"; continue; }
     printf '%s' "$key"
     return 0
   done
@@ -251,6 +262,7 @@ EOF_BBR
 
 main() {
   require_root
+  require_tty
   require_debian
 
   echo "Interactive VPS bootstrap for Debian"
