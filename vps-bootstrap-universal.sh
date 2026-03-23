@@ -18,25 +18,25 @@ tty_print() { printf '%s' "$*" > "$TTY_DEVICE"; }
 tty_println() { printf '%s\n' "$*" > "$TTY_DEVICE"; }
 
 require_root() {
-  [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root: bash ${SCRIPT_NAME}"
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Запустите от имени root: bash ${SCRIPT_NAME}"
 }
 
 require_tty() {
-  [[ -r "$TTY_DEVICE" && -w "$TTY_DEVICE" ]] || die "Interactive terminal not available. Run this script from a real SSH shell."
+  [[ -r "$TTY_DEVICE" && -w "$TTY_DEVICE" ]] || die "Интерактивный терминал недоступен. Запустите скрипт из реального SSH-сеанса."
 }
 
 require_supported_os() {
-  [[ -r /etc/os-release ]] || die "Cannot detect OS (missing /etc/os-release)."
+  [[ -r /etc/os-release ]] || die "Не удалось определить ОС (отсутствует /etc/os-release)."
   # shellcheck disable=SC1091
   . /etc/os-release
-  command -v apt-get >/dev/null 2>&1 || die "This script supports Debian/Ubuntu systems with apt-get."
+  command -v apt-get >/dev/null 2>&1 || die "Скрипт поддерживает только системы Debian/Ubuntu с apt-get."
   case "${ID:-}" in
     debian|ubuntu)
       OS_FAMILY="$ID"
       OS_NAME="${PRETTY_NAME:-$ID}"
       ;;
     *)
-      die "Unsupported system: ${PRETTY_NAME:-unknown}. Supported: ${SUPPORTED_IDS}."
+      die "Неподдерживаемая система: ${PRETTY_NAME:-unknown}. Поддерживаются: ${SUPPORTED_IDS}."
       ;;
   esac
 }
@@ -48,7 +48,7 @@ prompt_nonempty() {
     tty_print "$prompt"
     IFS= read -r value < "$TTY_DEVICE"
     [[ -n "$value" ]] && { printf '%s' "$value"; return 0; }
-    tty_println "Value cannot be empty."
+    tty_println "Значение не может быть пустым."
   done
 }
 
@@ -56,15 +56,15 @@ prompt_auth_method() {
   local choice=""
   while true; do
     tty_println ""
-    tty_println "Choose login method for the new user:"
-    tty_println "1) Password"
-    tty_println "2) SSH key only"
-    tty_print "Selection [1/2]: "
+    tty_println "Выберите метод входа для нового пользователя:"
+    tty_println "1) Пароль"
+    tty_println "2) Только SSH-ключ"
+    tty_print "Выбор [1/2]: "
     IFS= read -r choice < "$TTY_DEVICE"
     case "$choice" in
       1) printf 'password'; return 0 ;;
       2) printf 'ssh'; return 0 ;;
-      *) tty_println "Enter 1 or 2." ;;
+      *) tty_println "Введите 1 или 2." ;;
     esac
   done
 }
@@ -72,16 +72,16 @@ prompt_auth_method() {
 prompt_password() {
   local p1="" p2=""
   while true; do
-    tty_print "Enter password for the new user: "
+    tty_print "Введите пароль для нового пользователя: "
     IFS= read -r -s p1 < "$TTY_DEVICE"
     tty_println ""
 
-    tty_print "Repeat password: "
+    tty_print "Повторите пароль: "
     IFS= read -r -s p2 < "$TTY_DEVICE"
     tty_println ""
 
-    [[ -n "$p1" ]] || { tty_println "Password cannot be empty."; continue; }
-    [[ "$p1" == "$p2" ]] || { tty_println "Passwords do not match."; continue; }
+    [[ -n "$p1" ]] || { tty_println "Пароль не может быть пустым."; continue; }
+    [[ "$p1" == "$p2" ]] || { tty_println "Пароли не совпадают."; continue; }
     printf '%s' "$p1"
     return 0
   done
@@ -89,18 +89,18 @@ prompt_password() {
 
 validate_username() {
   local username="$1"
-  [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "Invalid username. Use lowercase letters, digits, _ or -, starting with a letter or _."
-  ! id "$username" >/dev/null 2>&1 || die "User '$username' already exists."
+  [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "Недопустимое имя пользователя. Используйте строчные буквы, цифры, _ или -, начиная с буквы или _."
+  ! id "$username" >/dev/null 2>&1 || die "Пользователь '$username' уже существует."
 }
 
 prompt_ssh_key() {
   local key=""
   tty_println ""
-  tty_println "Paste your PUBLIC SSH key (expected: ssh-rsa ...)."
+  tty_println "Вставьте ваш ПУБЛИЧНЫЙ SSH-ключ (ожидается: ssh-rsa ...)."
   while true; do
     IFS= read -r key < "$TTY_DEVICE"
-    [[ -n "$key" ]] || { tty_println "Key cannot be empty."; continue; }
-    [[ "$key" == ssh-rsa\ * ]] || { tty_println "This does not look like an RSA public key. It should start with 'ssh-rsa '."; continue; }
+    [[ -n "$key" ]] || { tty_println "Ключ не может быть пустым."; continue; }
+    [[ "$key" == ssh-rsa\ * ]] || { tty_println "Это не похоже на публичный RSA-ключ. Он должен начинаться с 'ssh-rsa '."; continue; }
     printf '%s' "$key"
     return 0
   done
@@ -125,11 +125,11 @@ prompt_trusted_ips() {
 
   while true; do
     tty_println ""
-    tty_println "Enter trusted IPs or CIDR ranges for whitelist."
-    tty_println "You can enter multiple values separated by spaces or commas."
-    tty_println "Examples: 1.2.3.4 5.6.7.8/32 2001:db8::1"
-    tty_println "These IPs will be added to UFW whitelist and Fail2ban ignoreip."
-    tty_print "Trusted IPs/CIDRs (leave empty to skip): "
+    tty_println "Введите доверенные IP-адреса или диапазоны CIDR для белого списка."
+    tty_println "Можно указать несколько значений через пробел или запятую."
+    tty_println "Примеры: 1.2.3.4 5.6.7.8/32 2001:db8::1"
+    tty_println "Эти IP будут добавлены в белый список UFW и в ignoreip Fail2ban."
+    tty_print "Доверенные IP/CIDR (оставьте пустым, чтобы пропустить): "
     IFS= read -r raw < "$TTY_DEVICE"
 
     cleaned="${raw//,/ }"
@@ -143,7 +143,7 @@ prompt_trusted_ips() {
 
     for token in $cleaned; do
       validate_ip_or_cidr "$token" || {
-        tty_println "Invalid IP or CIDR: $token"
+        tty_println "Неверный IP или CIDR: $token"
         valid=()
         break
       }
@@ -191,7 +191,7 @@ get_ssh_service_name() {
 }
 
 install_packages() {
-  log "Updating system and installing required packages for ${OS_NAME}"
+  log "Обновление системы и установка необходимых пакетов для ${OS_NAME}"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get -y upgrade
@@ -215,18 +215,18 @@ configure_user() {
   local password="${3:-}"
   local ssh_key="${4:-}"
 
-  log "Creating user '$username'"
+  log "Создание пользователя '$username'"
   adduser --disabled-password --gecos "" "$username"
 
   if [[ "$auth_method" == "password" ]]; then
-    [[ -n "$password" ]] || die "Password login selected, but password is empty."
+    [[ -n "$password" ]] || die "Выбран вход по паролю, но пароль не задан."
     echo "${username}:${password}" | chpasswd
   fi
 
   usermod -aG sudo "$username"
 
   if [[ "$auth_method" == "ssh" ]]; then
-    [[ -n "$ssh_key" ]] || die "SSH login selected, but SSH key is empty."
+    [[ -n "$ssh_key" ]] || die "Выбран вход по SSH-ключу, но ключ не задан."
     install -d -m 700 -o "$username" -g "$username" "/home/$username/.ssh"
     printf '%s\n' "$ssh_key" > "/home/$username/.ssh/authorized_keys"
     chown "$username:$username" "/home/$username/.ssh/authorized_keys"
@@ -242,9 +242,9 @@ configure_ssh() {
 
   [[ "$auth_method" == "ssh" ]] && password_auth="no"
 
-  command -v sshd >/dev/null 2>&1 || die "sshd binary not found after installing openssh-server."
+  command -v sshd >/dev/null 2>&1 || die "Бинарный файл sshd не найден после установки openssh-server."
 
-  log "Configuring SSH daemon"
+  log "Настройка SSH-демона"
   mkdir -p /etc/ssh/sshd_config.d
   ensure_include_for_sshd_dropins
 
@@ -257,10 +257,10 @@ KbdInteractiveAuthentication no
 UsePAM yes
 EOF_SSH
 
-  sshd -t || die "sshd configuration test failed. Config not applied."
+  sshd -t || die "Проверка конфигурации sshd завершилась ошибкой. Конфигурация не применена."
   systemctl enable "$ssh_service" >/dev/null 2>&1 || true
   systemctl restart "$ssh_service"
-  systemctl is-active --quiet "$ssh_service" || die "SSH service failed to restart."
+  systemctl is-active --quiet "$ssh_service" || die "Не удалось перезапустить SSH-сервис."
 }
 
 configure_fail2ban() {
@@ -270,7 +270,7 @@ configure_fail2ban() {
 
   [[ -n "$trusted_ips" ]] && ignore_line+=" ${trusted_ips}"
 
-  log "Configuring Fail2ban"
+  log "Настройка Fail2ban"
   mkdir -p /etc/fail2ban/jail.d
   cat > "$F2B_JAIL" <<EOF_F2B
 [DEFAULT]
@@ -287,7 +287,7 @@ EOF_F2B
 
   systemctl enable fail2ban >/dev/null 2>&1 || true
   systemctl restart fail2ban
-  systemctl is-active --quiet fail2ban || die "Fail2ban failed to start."
+  systemctl is-active --quiet fail2ban || die "Не удалось запустить Fail2ban."
 }
 
 collect_active_ports() {
@@ -322,7 +322,7 @@ configure_ufw() {
   local trusted_ips="$3"
   local item proto port ip
 
-  log "Configuring UFW"
+  log "Настройка UFW"
   ufw --force reset
   ufw default deny incoming
   ufw default allow outgoing
@@ -347,7 +347,7 @@ configure_ufw() {
 }
 
 configure_bbr() {
-  log "Checking BBR"
+  log "Проверка BBR"
 
   if ! sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
     modprobe tcp_bbr >/dev/null 2>&1 || true
@@ -379,12 +379,12 @@ main() {
   require_tty
   require_supported_os
 
-  tty_println "Interactive VPS bootstrap for Debian/Ubuntu"
-  tty_println "Detected OS: ${OS_NAME}"
-  tty_println "This script will update the server, create a sudo user, harden SSH, enable UFW, configure Fail2ban, install btop and try to enable BBR."
+  tty_println "Интерактивная настройка VPS для Debian/Ubuntu"
+  tty_println "Обнаруженная ОС: ${OS_NAME}"
+  tty_println "Этот скрипт обновит сервер, создаст sudo-пользователя, ужесточит настройки SSH, включит UFW, настроит Fail2ban, установит btop и попытается включить BBR."
   tty_println ""
 
-  username="$(prompt_nonempty 'Enter new username: ')"
+  username="$(prompt_nonempty 'Введите имя нового пользователя: ')"
   validate_username "$username"
   auth_method="$(prompt_auth_method)"
 
@@ -409,51 +409,51 @@ main() {
   bbr_status="$(configure_bbr)"
 
   tty_println ""
-  tty_println "Done"
+  tty_println "Готово"
   tty_println ""
-  tty_println "Detected OS: ${OS_NAME}"
-  tty_println "New sudo user: $username"
-  tty_println "Login method: $auth_method"
-  tty_println "New SSH port: $ssh_port"
+  tty_println "Обнаруженная ОС: ${OS_NAME}"
+  tty_println "Новый sudo-пользователь: $username"
+  tty_println "Метод входа: $auth_method"
+  tty_println "Новый SSH-порт: $ssh_port"
   tty_println ""
 
   if [[ -n "$trusted_ips" ]]; then
-    tty_println "Trusted IP whitelist:"
+    tty_println "Белый список доверенных IP:"
     for item in $trusted_ips; do
       tty_println "  - $item"
     done
     tty_println ""
-    tty_println "Fail2ban ignoreip includes localhost plus your trusted IPs."
+    tty_println "В ignoreip Fail2ban включены localhost и ваши доверенные IP."
     tty_println ""
   else
-    tty_println "Trusted IP whitelist: skipped"
+    tty_println "Белый список доверенных IP: пропущено"
     tty_println ""
   fi
 
-  tty_println "Allowed public ports in UFW:"
+  tty_println "Разрешённые публичные порты в UFW:"
   if [[ -n "$active_ports" ]]; then
     while IFS= read -r item; do
       [[ -n "$item" ]] && tty_println "  - $item"
     done <<< "$active_ports"
   else
-    tty_println "  - none detected (except SSH $ssh_port/tcp, which was allowed with rate limit)"
+    tty_println "  - не обнаружено (кроме SSH $ssh_port/tcp, разрешённого с ограничением частоты)"
   fi
   tty_println ""
 
   case "$bbr_status" in
     enabled)
-      tty_println "BBR: enabled" ;;
+      tty_println "BBR: включён" ;;
     failed)
-      tty_println "BBR: configuration was written, but the active check did not confirm it." ;;
+      tty_println "BBR: конфигурация записана, но активная проверка не подтвердила результат." ;;
     unsupported)
-      tty_println "BBR: not available in this kernel / provider image." ;;
+      tty_println "BBR: недоступен в данном ядре / образе провайдера." ;;
   esac
 
   tty_println ""
-  tty_println "Test SSH in a NEW terminal before closing this session:"
+  tty_println "Проверьте SSH в НОВОМ терминале, не закрывая текущий сеанс:"
   tty_println "  ssh -p $ssh_port $username@<your_server_ip>"
   tty_println ""
-  tty_println "Current UFW status:"
+  tty_println "Текущий статус UFW:"
   ufw status numbered
 }
 
