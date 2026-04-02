@@ -160,6 +160,20 @@ prompt_trusted_ips() {
   done
 }
 
+prompt_confirm() {
+  local prompt="${1:-Продолжить?}"
+  local choice=""
+  while true; do
+    tty_print "${prompt} [y/N]: "
+    IFS= read -r choice < "$TTY_DEVICE"
+    case "$choice" in
+      [yY]|[yY][eE][sS]) return 0 ;;
+      [nN]|[nN][oO]|"") return 1 ;;
+      *) tty_println "Введите y или n." ;;
+    esac
+  done
+}
+
 ensure_include_for_sshd_dropins() {
   if ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' "$SSHD_MAIN"; then
     cp -a "$SSHD_MAIN" "${SSHD_MAIN}.bak.$(date +%s)"
@@ -181,9 +195,11 @@ pick_random_port() {
 }
 
 get_ssh_service_name() {
-  if systemctl list-unit-files 2>/dev/null | grep -q '^ssh\.service'; then
+  local units
+  units="$(systemctl list-unit-files 2>/dev/null)"
+  if echo "$units" | grep -q '^ssh\.service'; then
     printf 'ssh'
-  elif systemctl list-unit-files 2>/dev/null | grep -q '^sshd\.service'; then
+  elif echo "$units" | grep -q '^sshd\.service'; then
     printf 'sshd'
   else
     printf 'ssh'
@@ -194,7 +210,8 @@ install_packages() {
   log "Обновление системы и установка необходимых пакетов для ${OS_NAME}"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get -y upgrade
+  apt-get -y -o Dpkg::Options::="--force-confold" full-upgrade
+  apt-get autoremove --purge -y
   apt-get install -y \
     sudo \
     openssh-server \
@@ -238,6 +255,7 @@ configure_ssh() {
   local ssh_port="$1"
   local ssh_service="$2"
   local auth_method="$3"
+  local username="$4"
   local password_auth="yes"
 
   [[ "$auth_method" == "ssh" ]] && password_auth="no"
@@ -250,10 +268,16 @@ configure_ssh() {
 
   cat > "$SSHD_DROPIN" <<EOF_SSH
 Port ${ssh_port}
-PermitRootLogin prohibit-password
+AllowUsers ${username}
+PermitRootLogin no
 PubkeyAuthentication yes
 PasswordAuthentication ${password_auth}
 KbdInteractiveAuthentication no
+LoginGraceTime 30
+MaxAuthTries 3
+X11Forwarding no
+ClientAliveInterval 300
+ClientAliveCountMax 2
 UsePAM yes
 EOF_SSH
 
@@ -323,6 +347,7 @@ configure_ufw() {
   local item proto port ip
 
   log "Настройка UFW"
+  warn "Сбрасываются все существующие правила UFW."
   ufw --force reset
   ufw default deny incoming
   ufw default allow outgoing
@@ -373,7 +398,7 @@ EOF_BBR
 }
 
 main() {
-  local username auth_method password="" ssh_key="" trusted_ips ssh_port ssh_service active_ports bbr_status item
+  local username auth_method password="" ssh_key="" trusted_ips ssh_port ssh_service active_ports bbr_status server_ip item
 
   require_root
   require_tty
@@ -394,17 +419,36 @@ main() {
     ssh_key="$(prompt_ssh_key)"
   fi
 
+  tty_println ""
+  tty_println "Итоговая конфигурация:"
+  tty_println "  Пользователь: $username"
+  tty_println "  Метод входа:  $auth_method"
+  tty_println ""
+  prompt_confirm "Начать установку и настройку?" || die "Отменено пользователем."
+
   install_packages
 
   trusted_ips="$(prompt_trusted_ips)"
   ssh_service="$(get_ssh_service_name)"
   ssh_port="$(pick_random_port)"
+  tty_println ""
+  tty_println "Выбранный SSH-порт: $ssh_port — запомните его до завершения скрипта!"
 
   configure_user "$username" "$auth_method" "$password" "$ssh_key"
-  configure_ssh "$ssh_port" "$ssh_service" "$auth_method"
+  configure_ssh "$ssh_port" "$ssh_service" "$auth_method" "$username"
   configure_fail2ban "$ssh_port" "$trusted_ips"
 
   active_ports="$(collect_active_ports)"
+  if [[ -n "$active_ports" ]]; then
+    tty_println ""
+    tty_println "UFW: будут разрешены следующие обнаруженные публичные порты:"
+    while IFS= read -r item; do
+      [[ -n "$item" ]] && tty_println "  - $item"
+    done <<< "$active_ports"
+    tty_println "  SSH-порт $ssh_port/tcp — с rate-limit; все остальные — разрешены."
+    prompt_confirm "Продолжить настройку UFW?" || die "Отменено пользователем."
+  fi
+
   configure_ufw "$ssh_port" "$active_ports" "$trusted_ips"
   bbr_status="$(configure_bbr)"
 
@@ -450,11 +494,16 @@ main() {
   esac
 
   tty_println ""
+  server_ip="$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || true)"
   tty_println "Проверьте SSH в НОВОМ терминале, не закрывая текущий сеанс:"
-  tty_println "  ssh -p $ssh_port $username@<your_server_ip>"
+  if [[ -n "$server_ip" ]]; then
+    tty_println "  ssh -p $ssh_port $username@${server_ip}"
+  else
+    tty_println "  ssh -p $ssh_port $username@<your_server_ip>"
+  fi
   tty_println ""
   tty_println "Текущий статус UFW:"
-  ufw status numbered
+  ufw status numbered > "$TTY_DEVICE"
 }
 
 main "$@"
