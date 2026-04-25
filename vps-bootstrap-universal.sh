@@ -182,12 +182,40 @@ ensure_include_for_sshd_dropins() {
   fi
 }
 
+port_is_reserved() {
+  local port="$1"
+  awk -v port="$port" '
+    $1 !~ /^#/ && $2 ~ "/" {
+      split($2, service, "/")
+      if (service[1] == port) {
+        found = 1
+        exit
+      }
+    }
+    END { exit found ? 0 : 1 }
+  ' /etc/services 2>/dev/null
+}
+
 pick_random_port() {
   local port used
   used="$(ss -Htanul 2>/dev/null | awk '{print $5}' | sed -En 's/.*:([0-9]+)$/\1/p' | sort -u || true)"
   while true; do
     port="$(shuf -i 20000-65000 -n 1)"
-    if ! grep -qx "$port" <<< "$used"; then
+    if ! grep -qx "$port" <<< "$used" && ! port_is_reserved "$port"; then
+      printf '%s' "$port"
+      return 0
+    fi
+  done
+}
+
+pick_confirmed_ssh_port() {
+  local port=""
+  while true; do
+    port="$(pick_random_port)"
+    tty_println ""
+    tty_println "Предлагаемый SSH-порт: $port"
+    tty_println "Порт не найден среди текущих listen-портов и записей /etc/services."
+    if prompt_confirm "Использовать этот порт для SSH?"; then
       printf '%s' "$port"
       return 0
     fi
@@ -210,8 +238,7 @@ install_packages() {
   log "Обновление системы и установка необходимых пакетов для ${OS_NAME}"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get -y -o Dpkg::Options::="--force-confold" full-upgrade
-  apt-get autoremove --purge -y
+  apt-get -y -o Dpkg::Options::="--force-confold" upgrade
   apt-get install -y \
     sudo \
     openssh-server \
@@ -235,10 +262,8 @@ configure_user() {
   log "Создание пользователя '$username'"
   adduser --disabled-password --gecos "" "$username"
 
-  if [[ "$auth_method" == "password" ]]; then
-    [[ -n "$password" ]] || die "Выбран вход по паролю, но пароль не задан."
-    echo "${username}:${password}" | chpasswd
-  fi
+  [[ -n "$password" ]] || die "Пароль нового пользователя не задан."
+  echo "${username}:${password}" | chpasswd
 
   usermod -aG sudo "$username"
 
@@ -257,6 +282,7 @@ configure_ssh() {
   local auth_method="$3"
   local username="$4"
   local password_auth="yes"
+  local main_backup="" dropin_backup="" dropin_existed="no" tmp_dropin=""
 
   [[ "$auth_method" == "ssh" ]] && password_auth="no"
 
@@ -264,9 +290,17 @@ configure_ssh() {
 
   log "Настройка SSH-демона"
   mkdir -p /etc/ssh/sshd_config.d
-  ensure_include_for_sshd_dropins
+  main_backup="${SSHD_MAIN}.bak.$(date +%s)"
+  cp -a "$SSHD_MAIN" "$main_backup"
 
-  cat > "$SSHD_DROPIN" <<EOF_SSH
+  if [[ -e "$SSHD_DROPIN" ]]; then
+    dropin_existed="yes"
+    dropin_backup="${SSHD_DROPIN}.bak.$(date +%s)"
+    cp -a "$SSHD_DROPIN" "$dropin_backup"
+  fi
+
+  tmp_dropin="${SSHD_DROPIN}.tmp.$$"
+  cat > "$tmp_dropin" <<EOF_SSH
 Port ${ssh_port}
 AllowUsers ${username}
 PermitRootLogin no
@@ -281,10 +315,31 @@ ClientAliveCountMax 2
 UsePAM yes
 EOF_SSH
 
-  sshd -t || die "Проверка конфигурации sshd завершилась ошибкой. Конфигурация не применена."
+  ensure_include_for_sshd_dropins
+  mv "$tmp_dropin" "$SSHD_DROPIN"
+
+  if ! sshd -t; then
+    cp -a "$main_backup" "$SSHD_MAIN"
+    if [[ "$dropin_existed" == "yes" ]]; then
+      cp -a "$dropin_backup" "$SSHD_DROPIN"
+    else
+      rm -f "$SSHD_DROPIN"
+    fi
+    rm -f "$tmp_dropin"
+    die "Проверка конфигурации sshd завершилась ошибкой. Предыдущая конфигурация восстановлена."
+  fi
+
   systemctl enable "$ssh_service" >/dev/null 2>&1 || true
-  systemctl restart "$ssh_service"
-  systemctl is-active --quiet "$ssh_service" || die "Не удалось перезапустить SSH-сервис."
+  if ! systemctl restart "$ssh_service" || ! systemctl is-active --quiet "$ssh_service"; then
+    cp -a "$main_backup" "$SSHD_MAIN"
+    if [[ "$dropin_existed" == "yes" ]]; then
+      cp -a "$dropin_backup" "$SSHD_DROPIN"
+    else
+      rm -f "$SSHD_DROPIN"
+    fi
+    systemctl restart "$ssh_service" >/dev/null 2>&1 || true
+    die "Не удалось перезапустить SSH-сервис. Предыдущая конфигурация восстановлена."
+  fi
 }
 
 configure_fail2ban() {
@@ -344,6 +399,7 @@ configure_ufw() {
   local ssh_port="$1"
   local active_ports="$2"
   local trusted_ips="$3"
+  local allow_trusted_all="$4"
   local item proto port ip
 
   log "Настройка UFW"
@@ -352,7 +408,7 @@ configure_ufw() {
   ufw default deny incoming
   ufw default allow outgoing
 
-  if [[ -n "$trusted_ips" ]]; then
+  if [[ -n "$trusted_ips" && "$allow_trusted_all" == "yes" ]]; then
     for ip in $trusted_ips; do
       ufw allow from "$ip"
     done
@@ -398,7 +454,7 @@ EOF_BBR
 }
 
 main() {
-  local username auth_method password="" ssh_key="" trusted_ips ssh_port ssh_service active_ports bbr_status server_ip item
+  local username auth_method password="" ssh_key="" trusted_ips allow_trusted_all="no" ssh_port ssh_service active_ports bbr_status server_ip item
 
   require_root
   require_tty
@@ -411,11 +467,10 @@ main() {
 
   username="$(prompt_nonempty 'Введите имя нового пользователя: ')"
   validate_username "$username"
+  password="$(prompt_password)"
   auth_method="$(prompt_auth_method)"
 
-  if [[ "$auth_method" == "password" ]]; then
-    password="$(prompt_password)"
-  else
+  if [[ "$auth_method" == "ssh" ]]; then
     ssh_key="$(prompt_ssh_key)"
   fi
 
@@ -423,14 +478,22 @@ main() {
   tty_println "Итоговая конфигурация:"
   tty_println "  Пользователь: $username"
   tty_println "  Метод входа:  $auth_method"
+  tty_println "  Пароль пользователя будет задан для входа по паролю и sudo."
   tty_println ""
   prompt_confirm "Начать установку и настройку?" || die "Отменено пользователем."
 
   install_packages
 
   trusted_ips="$(prompt_trusted_ips)"
+  if [[ -n "$trusted_ips" ]]; then
+    tty_println ""
+    tty_println "Доверенные IP всегда будут добавлены в ignoreip Fail2ban."
+    if prompt_confirm "Разрешить доверенным IP доступ ко всем портам через UFW?"; then
+      allow_trusted_all="yes"
+    fi
+  fi
   ssh_service="$(get_ssh_service_name)"
-  ssh_port="$(pick_random_port)"
+  ssh_port="$(pick_confirmed_ssh_port)"
   tty_println ""
   tty_println "Выбранный SSH-порт: $ssh_port — запомните его до завершения скрипта!"
 
@@ -449,7 +512,7 @@ main() {
     prompt_confirm "Продолжить настройку UFW?" || die "Отменено пользователем."
   fi
 
-  configure_ufw "$ssh_port" "$active_ports" "$trusted_ips"
+  configure_ufw "$ssh_port" "$active_ports" "$trusted_ips" "$allow_trusted_all"
   bbr_status="$(configure_bbr)"
 
   tty_println ""
@@ -468,6 +531,11 @@ main() {
     done
     tty_println ""
     tty_println "В ignoreip Fail2ban включены localhost и ваши доверенные IP."
+    if [[ "$allow_trusted_all" == "yes" ]]; then
+      tty_println "UFW: доверенным IP разрешён доступ ко всем портам."
+    else
+      tty_println "UFW: доверенным IP не выдавалось отдельное разрешение на все порты."
+    fi
     tty_println ""
   else
     tty_println "Белый список доверенных IP: пропущено"
